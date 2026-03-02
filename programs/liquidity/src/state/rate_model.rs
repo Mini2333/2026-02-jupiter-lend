@@ -726,120 +726,164 @@ mod tests {
         assert_eq!(rate, MAX_RATE);
     }
 
-    // =========================================================================
-    // [M-2] MEDIUM — Rate Model V1 Allows Economically Perverse Declining Rate
-    //              Before Kink (Missing Monotonicity Check)
+    // ========================================================================
+    // [M-2] SECURITY POC — Rate Model V1: Declining-Rate-Before-Kink Allowed
     //
-    // Audit finding: `update_rate_data_v1` does NOT require
-    // `rate_at_utilization_zero <= rate_at_utilization_kink`.
-    // An admin can configure a rate curve where the borrow rate *decreases* as
-    // utilization increases from 0% to the kink.  This is economically perverse
-    // because it incentivises over-utilisation: borrowers pay *less* as more of
-    // the reserve is borrowed.
+    // `set_rate_v1` ONLY checks that `rate_at_kink <= rate_at_max`.
+    // It does NOT check `rate_at_zero <= rate_at_kink`.
     //
-    // The validation code only checks `rate_at_kink <= rate_at_max` (declining
-    // rate after the kink is rejected) but has no symmetric check before it.
-    // Specifically, `set_rate_v1` contains:
+    // An admin can therefore configure a rate curve where the borrow rate
+    // *decreases* as utilization rises from 0% to the kink.  This is
+    // economically perverse: the more assets are borrowed, the cheaper the
+    // rate, incentivising borrowers to max-out the pool and drain it.
     //
-    //   if rate_data.kink == 0 ||
-    //      rate_data.kink >= FOUR_DECIMALS ||
-    //      rate_data.rate_at_utilization_kink > rate_data.rate_at_utilization_max
-    //   { return Err(ErrorCodes::InvalidParams.into()); }
-    //
-    // There is no `rate_data.rate_at_utilization_zero > rate_data.rate_at_utilization_kink`
-    // guard here.
-    //
-    // Impact: a misconfigured (or maliciously configured) rate model could make
-    // high-utilisation borrowing cheaper than low-utilisation borrowing, draining
-    // the reserve while rewarding the behaviour the protocol needs to discourage.
-    // =========================================================================
+    // The protocol comment in `set_rate_v1` even acknowledges this:
+    //   "declining rate is supported before kink."
+    // But the audit classifies it as a Medium finding because an admin could
+    // exploit this misconfiguration to covertly extract value from suppliers.
+    // ========================================================================
 
-    /// [M-2] PoC #1 — Declining rate before kink is ACCEPTED by `set_rate_v1`.
+    /// M-2 PoC #1 — set_rate_v1 ACCEPTS a config where rate_at_zero > rate_at_kink.
     ///
-    /// Configures `rate_at_zero = 5000` (50%) and `rate_at_kink = 100` (1%).
-    /// The validation must NOT return an error — demonstrating the vulnerability.
+    /// A rate of 50% at 0% utilization declining to 1% at the kink means
+    /// borrowers are rewarded for increasing utilization — completely perverse.
+    /// The test passes because the protocol does NOT validate this.
     #[test]
     fn test_m2_v1_declining_rate_before_kink_is_accepted() {
         let mut rate_model = RateModel::default();
 
-        // rate_at_zero (50%) > rate_at_kink (1%): perverse declining slope
-        let rate_data = RateDataV1Params {
-            kink: 8000,                      // 80% utilization kink
-            rate_at_utilization_zero: 5000,  // 50% — HIGH at 0% utilization
-            rate_at_utilization_kink: 100,   // 1%  — LOW at kink (perverse!)
-            rate_at_utilization_max: 15000,  // 150% — HIGH again after kink
+        // Economically perverse config: rate DECREASES as utilization rises
+        let perverse_config = RateDataV1Params {
+            kink: 8000,                          // 80% kink
+            rate_at_utilization_zero: 5000,      // 50% at 0% utilization ← HIGH
+            rate_at_utilization_kink: 100,       // 1%  at 80% kink       ← LOW (should fail!)
+            rate_at_utilization_max: 15000,      // 150% at 100% (valid: kink < max)
         };
 
-        // [M-2] VULNERABILITY PROVEN: set_rate_v1 must NOT reject this config.
-        // The missing monotonicity check allows rate_at_zero > rate_at_kink.
-        let result = rate_model.set_rate_v1(rate_data);
+        // BUG: This should return Err(InvalidParams) but it SUCCEEDS.
+        // The only check is rate_at_kink <= rate_at_max, which passes (100 <= 15000).
+        let result = rate_model.set_rate_v1(perverse_config);
         assert!(
             result.is_ok(),
-            "[M-2] VULNERABILITY NOT PRESENT — declining rate before kink was rejected. \
-             If this assertion fires, the bug has been fixed."
+            "[M-2] VALIDATION GAP: set_rate_v1 should reject rate_at_zero > rate_at_kink \
+             but accepted it. This allows an admin to set a perverse declining rate curve."
+        );
+
+        // Prove the perverse curve is actually used: rate at 0% is high, at kink it is low
+        let rate_at_zero = rate_model.calc_borrow_rate_from_utilization(0).unwrap();
+        let rate_at_kink = rate_model.calc_borrow_rate_from_utilization(8000).unwrap();
+
+        assert_eq!(rate_at_zero, 5000, "Rate at 0% utilization should be 50%");
+        assert_eq!(rate_at_kink, 100, "Rate at 80% kink should be 1%");
+
+        // The rate DECREASES from 0% → kink: this is backwards!
+        assert!(
+            rate_at_zero > rate_at_kink,
+            "[M-2] Rate at 0% ({}) should be HIGHER than at kink ({}), confirming perverse curve",
+            rate_at_zero, rate_at_kink
         );
 
         println!(
-            "\n[M-2 PROVEN] set_rate_v1 accepted rate_at_zero=50% > rate_at_kink=1%.\n\
-             A monotonically DECREASING rate curve from 0% to 80% utilisation is now live.\n\
-             Borrowers pay LESS as utilisation increases toward the kink — a perverse incentive\n\
-             that rewards over-utilisation and can silently drain the reserve."
+            "\n[M-2 PROVEN] Admin can configure a perverse declining rate:\n\
+             - Rate at   0% utilization = {}  ({}%)\n\
+             - Rate at  80% utilization = {} ({}%)\n\
+             - Rate at 100% utilization = ??? (valid spike after kink)\n\
+             Impact: as more funds are borrowed, borrow cost drops → incentivizes\n\
+             over-borrowing and pool drain. No protocol-level validation prevents this.",
+            rate_at_zero, rate_at_zero / 100,
+            rate_at_kink, rate_at_kink / 100
         );
     }
 
-    /// [M-2] PoC #2 — The resulting rate curve is DECREASING before the kink.
+    /// M-2 PoC #2 — The perverse rate produces a DECREASING borrow cost as utilization rises.
     ///
-    /// After setting a perverse config, calc_borrow_rate_from_utilization returns
-    /// LOWER rates as utilisation increases from 0% toward the kink.
+    /// Shows the full curve: 50% at 0%, declining to 1% at 80%, then spiking to 150% at 100%.
+    /// Borrowers pay the least when utilization is highest (most damaging to suppliers).
     #[test]
-    fn test_m2_v1_rate_decreases_before_kink() {
+    fn test_m2_v1_declining_rate_curve_verified_point_by_point() {
         let mut rate_model = RateModel::default();
+        rate_model
+            .set_rate_v1(RateDataV1Params {
+                kink: 8000,
+                rate_at_utilization_zero: 5000,
+                rate_at_utilization_kink: 100,
+                rate_at_utilization_max: 15000,
+            })
+            .unwrap();
 
-        // rate_at_zero (50%) > rate_at_kink (1%)
-        let rate_data = RateDataV1Params {
-            kink: 8000,                      // 80%
-            rate_at_utilization_zero: 5000,  // 50%
-            rate_at_utilization_kink: 100,   // 1%
-            rate_at_utilization_max: 15000,  // 150%
-        };
+        // Rates at regular intervals — all should DECREASE up to kink
+        let points = [
+            (0u128,    5000u16),  // 0% util → 50%
+            (2000u128, 3775u16),  // 20%     → ~37.75%
+            (4000u128, 2550u16),  // 40%     → ~25.5%
+            (6000u128, 1325u16),  // 60%     → ~13.25%
+            (8000u128,  100u16),  // 80% (kink) → 1%
+        ];
 
-        rate_model.set_rate_v1(rate_data).unwrap();
-
-        let rate_at_0_pct = rate_model.calc_borrow_rate_from_utilization(0).unwrap();
-        let rate_at_40_pct = rate_model.calc_borrow_rate_from_utilization(4000).unwrap();
-        let rate_at_80_pct = rate_model.calc_borrow_rate_from_utilization(8000).unwrap();
-
-        // [M-2] The rate curve must decrease as utilisation increases to the kink.
-        assert!(
-            rate_at_0_pct > rate_at_40_pct,
-            "[M-2] Rate at 0% ({}) should be GREATER than rate at 40% ({}) — \
-             confirming the declining curve",
-            rate_at_0_pct, rate_at_40_pct
-        );
-        assert!(
-            rate_at_40_pct > rate_at_80_pct,
-            "[M-2] Rate at 40% ({}) should be GREATER than rate at kink 80% ({}) — \
-             confirming the declining curve",
-            rate_at_40_pct, rate_at_80_pct
-        );
+        let mut prev_rate = u16::MAX;
+        for (util, expected_rate) in &points {
+            let rate = rate_model.calc_borrow_rate_from_utilization(*util).unwrap();
+            assert_eq!(
+                rate, *expected_rate,
+                "[M-2] At {}% utilization expected rate {}bps but got {}bps",
+                util / 100, expected_rate, rate
+            );
+            assert!(
+                rate <= prev_rate,
+                "[M-2] Rate should be declining: at {}% util rate={} > prev_rate={}",
+                util / 100, rate, prev_rate
+            );
+            prev_rate = rate;
+        }
 
         println!(
-            "\n[M-2 PROVEN] Borrow rate curve DECREASES before the kink:\n\
-             Utilisation  0% → rate = {} ({}%)\n\
-             Utilisation 40% → rate = {} ({}%)\n\
-             Utilisation 80% → rate = {} ({}%) ← kink\n\
-             As utilisation rises from 0% to 80%, borrowers pay LESS interest.\n\
-             This incentivises maximum borrowing up to the kink.",
-            rate_at_0_pct,  rate_at_0_pct  / 100,
-            rate_at_40_pct, rate_at_40_pct / 100,
-            rate_at_80_pct, rate_at_80_pct / 100,
+            "\n[M-2 PROVEN] Full declining rate curve validated:\n\
+             Utilization 0%→80%: rate drops from 5000bps → 100bps.\n\
+             Borrowers are incentivized to push pool to maximum utilization."
         );
     }
 
-    /// [M-2] PoC #3 — Control: declining rate AFTER kink is still rejected.
+    /// M-2 PoC #3 — Missing monotonicity check means the existing test
+    /// `test_v1_rate_curve_monotonic` only tests a NORMAL config.
+    /// With a perverse config, the same monotonicity assertion FAILS —
+    /// proving this is a real concern, not just theoretical.
+    #[test]
+    fn test_m2_v1_perverse_config_breaks_monotonicity_assumption() {
+        let mut rate_model = RateModel::default();
+        rate_model
+            .set_rate_v1(RateDataV1Params {
+                kink: 8000,
+                rate_at_utilization_zero: 5000,
+                rate_at_utilization_kink: 100,
+                rate_at_utilization_max: 15000,
+            })
+            .unwrap();
+
+        // If we assume rates are monotonically increasing (as expected),
+        // the following assertion would FAIL — proving the assumption is violated.
+        let rate_at_low = rate_model.calc_borrow_rate_from_utilization(1000).unwrap();
+        let rate_at_mid = rate_model.calc_borrow_rate_from_utilization(5000).unwrap();
+
+        // This is the WRONG ordering: low-util rate > mid-util rate
+        assert!(
+            rate_at_low > rate_at_mid,
+            "[M-2 control] Rate at low util ({}) should be > mid util ({}) \
+             (backwards from what a healthy curve requires)",
+            rate_at_low, rate_at_mid
+        );
+
+        println!(
+            "\n[M-2 PROVEN — monotonicity broken] rate@10%util={}, rate@50%util={}\n\
+             The declining segment violates the expected invariant that borrow rates\n\
+             increase with utilization.",
+            rate_at_low, rate_at_mid
+        );
+    }
+
+    /// M-2 PoC #4 — Control: declining rate AFTER kink is still rejected.
     ///
-    /// Confirms the existing check works in the other direction, making the
-    /// missing pre-kink monotonicity check the precise point of failure.
+    /// Confirms the existing check works in the other direction, highlighting
+    /// the asymmetry — the check exists for kink→max but NOT for zero→kink.
     #[test]
     fn test_m2_v1_declining_rate_after_kink_is_correctly_rejected() {
         let mut rate_model = RateModel::default();
@@ -864,12 +908,11 @@ mod tests {
         );
     }
 
-    /// [M-2] PoC #4 — Edge case: rate_at_zero == rate_at_kink is allowed (flat slope).
+    /// M-2 PoC #5 — Edge case: rate_at_zero == rate_at_kink is allowed (flat slope).
     ///
-    /// A flat slope before the kink is a degenerate but technically valid curve.
-    /// This is accepted by the existing code (as it should be), and should remain
-    /// accepted.  The vulnerability is specifically that rate_at_zero can be
-    /// STRICTLY GREATER than rate_at_kink.
+    /// A flat slope before the kink is accepted by the existing code (as it should be).
+    /// The vulnerability is specifically that rate_at_zero can be STRICTLY GREATER
+    /// than rate_at_kink.
     #[test]
     fn test_m2_v1_flat_rate_before_kink_is_accepted() {
         let mut rate_model = RateModel::default();
