@@ -187,7 +187,7 @@ mod tests {
     fn flashloan_admin_can_be_frontrun() {
         let mut fixture = LiquidityFixture::new().expect("Failed to create liquidity fixture");
         let flashloan_program_path = BaseFixture::find_program_path("flashloan.so")
-            .expect("flashloan.so not found. Run anchor build first");
+            .expect("flashloan.so not found. Build program binaries before running this test");
         fixture
             .vm
             .add_program_from_file(&FLASHLOAN_PROGRAM_ID, &flashloan_program_path)
