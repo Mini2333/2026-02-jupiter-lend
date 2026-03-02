@@ -13,4 +13,5 @@ deploy/
 keys/
 .compute_budget/
 devnet/
-docker-target/
+docker-target/target/
+target/
