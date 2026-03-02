@@ -1,4 +1,5 @@
 pub mod addresses;
+pub mod frontrun_admin_test;
 pub mod lending;
 pub mod liquidity;
 pub mod oracle;
