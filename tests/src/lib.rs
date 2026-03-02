@@ -2,6 +2,7 @@ pub mod addresses;
 pub mod lending;
 pub mod liquidity;
 pub mod oracle;
+pub mod security;
 pub mod vaults;
 
 pub mod connection;
