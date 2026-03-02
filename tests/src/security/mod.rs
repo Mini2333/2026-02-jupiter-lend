@@ -1,7 +1,7 @@
 //! Security Proof-of-Concept Tests
 //!
-//! This module contains executable PoC tests that prove the two critical
-//! vulnerabilities identified in the Red Team audit:
+//! This module contains executable PoC tests that prove the critical and high
+//! severity vulnerabilities identified in the Red Team audit:
 //!
 //! * [C-1] Admin PDA Initialization Front-Running — any wallet that calls
 //!   `init_liquidity` (or its vault/oracle/flashloan equivalents) first
@@ -32,4 +32,5 @@
 
 pub mod critical_c1_admin_frontrun;
 pub mod critical_c2_auth_unpause;
+pub mod high_h4_claim_account_permissionless;
 pub mod high_h4_permissionless_claim_init;
