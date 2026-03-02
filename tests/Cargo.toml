@@ -10,6 +10,7 @@ liquidity = { path = "../programs/liquidity" }
 lending = { path = "../programs/lending", features=["no-entrypoint"] }
 lending_reward_rate_model = { path = "../programs/lendingRewardRateModel", features=["no-entrypoint"] }
 vaults = { path = "../programs/vaults" }
+flashloan = { path = "../programs/flashloan", features=["no-entrypoint"] }
 library = { path = "../crates/library" }
 mpl-token-metadata = "5.1.0"
 fluid-test-framework = { path = "../test-utils/rust" }

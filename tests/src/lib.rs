@@ -7,5 +7,7 @@ pub mod vaults;
 pub mod connection;
 pub use connection::*;
 
+pub mod frontrun_admin_test;
+
 pub mod utils;
 pub use utils::*;
